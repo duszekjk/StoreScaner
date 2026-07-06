@@ -41,6 +41,7 @@ struct ContentView: View {
                 if #available(iOS 26.0, *) {
                     Text(connectionManager.log.last ?? "No activity yet")
                         .font(.footnote)
+                        .padding(6)
                         .glassEffect()
                         .onTapGesture { showLog = true }
                 } else {
@@ -70,21 +71,15 @@ struct ContentView: View {
             .tabItem {
                 Label("Restocking", systemImage: "shippingbox.fill")
             }
-            
-            // Inventory
-            //            List {
-            //                ForEach(connectionManager.inventory, id: \.productItemID) { item in
-            //                    VStack(alignment: .leading) {
-            //                        Text("🆔 \(item.productItemID)")
-            //                            .font(.headline)
-            //                        Text("📦 Count: \(item.count)")
-            //                    }
-            //                }
-            //            }
             InventoryView(productTypes: connectionManager.productTypes, inventory: connectionManager.inventory, updates: connectionManager.productUpdates)
+                .environmentObject(connectionManager) 
                 .tabItem {
                     Label("Inventory", systemImage: "archivebox")
                 }
+                .onAppear()
+            {
+                print(connectionManager.inventory)
+            }
             
             ProductListView(productTypes: $connectionManager.productTypes, inventory: $connectionManager.inventory, send:
                                 {connectionManager.sendCurrentState()})
@@ -102,20 +97,36 @@ struct ContentView: View {
         .onReceive(connectionManager.$connectedPeer) { peer in
             guard let peerID = peer?.displayName, !knownPeers.contains(peerID) else { return }
             knownPeers.insert(peerID)
-            //            connectionManager.logEvent("🔁 First time seeing \(peerID), sending state")
-            //            connectionManager.sendCurrentState()
+            connectionManager.logEvent("🔁 First time seeing \(peerID), sending state")
+            connectionManager.sendCurrentState()
         }
         .sheet(isPresented: $showLog) {
             ScrollView {
                 VStack()
                 {
-                    Button("Validate Sync") {
-                        connectionManager.sendValidationRequest()
-                    }
                     Text(connectionManager.log.joined(separator: "\n"))
                         .padding()
                         .textSelection(.enabled)
                         .font(.system(size: 13, design: .monospaced))
+                }
+            }
+            .toolbar
+            {
+                
+                ToolbarItem(placement: .navigationBarLeading) {
+                    
+                    Button("Validate Sync") {
+                        connectionManager.sendValidationRequest()
+                    }
+                }
+                
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: {
+                        connectionManager.sendCurrentState()
+                        
+                    }) {
+                        Label("Sync", systemImage: "network")
+                    }
                 }
             }
         }

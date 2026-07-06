@@ -12,7 +12,7 @@ extension Data {
 
 
 extension String {
-    static var serviceName = "ssync123abc"
+    static var serviceName = "ssc123v3"
     static var persistentDeviceID: String {
         let key = "com.storeScaner.deviceID"
         if let saved = UserDefaults.standard.string(forKey: key) {
@@ -53,22 +53,38 @@ class MPConnectionManager: NSObject, ObservableObject {
         }
     }
 
-    @Published var productUpdates: [ProductUpdate] = LocalStorage.load([ProductUpdate].self, from: "productUpdates.json") ?? [] {
+    @Published var productUpdates: [ProductUpdate] = {
+        let all = LocalStorage.load([ProductUpdate].self, from: "productUpdates.json") ?? []
+        let cutoff = UserDefaults.standard.double(forKey: "resetTimestamp")
+        print("resetTimestamp \(cutoff)")
+        print("all \(all.count) \(all.first?.timestamp.description ?? "nil")")
+        let fil = all.filter { $0.timestamp >= cutoff }
+        print("fil \(fil.count)")
+        return fil
+    }() {
         didSet {
             DispatchQueue.global(qos: .background).async {
                 LocalStorage.save(self.productUpdates, to: "productUpdates.json")
             }
         }
     }
+    @Published var resetTimestamp: TimeInterval? = UserDefaults.standard.double(forKey: "resetTimestamp") {
+        didSet {
+            UserDefaults.standard.set(resetTimestamp, forKey: "resetTimestamp")
+        }
+    }
 
-    @Published var inventory: [InventoryItem] = LocalStorage.load([InventoryItem].self, from: "inventory.json") ?? [] {
+    @Published var inventory: [InventoryItem] = [] {
         didSet {
             DispatchQueue.global(qos: .background).async {
                 LocalStorage.save(self.inventory, to: "inventory.json")
             }
         }
     }
-
+    public var lastFailedInternetSync: Date? {
+        get { UserDefaults.standard.object(forKey: "lastFailedInternetSync") as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: "lastFailedInternetSync") }
+    }
     
 
     init(yourName: String) {
@@ -76,7 +92,7 @@ class MPConnectionManager: NSObject, ObservableObject {
         self.nearbyServiceAdvertiser = MCNearbyServiceAdvertiser(peer: myPeerId, discoveryInfo: nil, serviceType: serviceType)
         self.nearbyServiceBrowser = MCNearbyServiceBrowser(peer: myPeerId, serviceType: serviceType)
         super.init()
-        
+        print("iit menager")
         session.delegate = self
         nearbyServiceAdvertiser.delegate = self
         nearbyServiceBrowser.delegate = self
@@ -84,8 +100,17 @@ class MPConnectionManager: NSObject, ObservableObject {
         for productType in productTypes {
             items.append(contentsOf: productType.generateProductItems())
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0)
+        {
+            print("i\(self.inventory)")
+            self.recalculateInventory()
+            print("i\(self.inventory)")
+            DispatchQueue.global(qos: .background).async {
+                LocalStorage.save(self.inventory, to: "inventory.json")
+            }
+        }
     }
-    private func computePayloadHash() -> Int {
+    public func computePayloadHash() -> Int {
         var hasher = Hasher()
         hasher.combine(productTypes.count)
         hasher.combine(productUpdates.count)
@@ -182,6 +207,7 @@ class MPConnectionManager: NSObject, ObservableObject {
     func startAdvertising() {
         logEvent("📡 Starting to advertise")
         nearbyServiceAdvertiser.startAdvertisingPeer()
+        syncWithServerIfGoodConnection()
     }
 
     func stopAdvertising() {
@@ -190,6 +216,9 @@ class MPConnectionManager: NSObject, ObservableObject {
     }
 
     func sendCurrentState() {
+//        DispatchQueue.global(qos: .background).async {
+//            self.syncWithServerIfGoodConnection()
+//        }
         guard !session.connectedPeers.isEmpty else {
             logEvent("No connected peers")
             return
@@ -197,7 +226,10 @@ class MPConnectionManager: NSObject, ObservableObject {
 
         let hash = computePayloadHash()
         let ptHashes = productTypeHashes()
-
+        if let resetTimestamp
+        {
+            sendResetBroadcast(timestamp: resetTimestamp)
+        }
         let metaPayload = SyncMetaPayload(
             deviceID: myPeerId.displayName,
             payloadHash: hash,
@@ -245,12 +277,17 @@ extension MPConnectionManager: MCSessionDelegate {
                 self.logEvent("❌ Disconnected from \(peerID.displayName)")
                 self.connectedPeer = nil
             }
-            startBrowsing()
+            DispatchQueue.main.asyncAfter(deadline: .now()+1.0) {
+                self.startBrowsing()
+            }
         case .connecting:
             logEvent("🔌 Connecting to \(peerID.displayName)")
         case .connected:
             logEvent("✅ Connected to \(peerID.displayName)")
-            connectedPeer = peerID
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                self.connectedPeer = peerID
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 0.5...1.5)) {
                 self.sendCurrentState()
             }
@@ -271,6 +308,26 @@ extension MPConnectionManager: MCSessionDelegate {
                 log.append(ptResult)
                 log.append(invResult)
                 return
+            }
+            if let reset = try? JSONDecoder().decode(ResetInfo.self, from: data),
+               reset.type == "reset" {
+                if(self.resetTimestamp ?? 0 < reset.resetTimestamp)
+                {
+                    DispatchQueue.main.async {
+                        self.resetTimestamp = reset.resetTimestamp
+                        
+                        let filtered = self.productUpdates.filter { $0.timestamp >= reset.resetTimestamp }
+                        self.productUpdates = filtered
+                        self.seenUpdateKeys = Set(filtered.map(\.uniqueKey))
+                        
+                        self.recalculateInventory()
+                        self.logEvent("🔄 Applied remote reset from \(reset.origin), timestamp \(reset.resetTimestamp)")
+                        
+                        LocalStorage.save(self.productUpdates, to: "productUpdates.json")
+                        LocalStorage.save(self.inventory, to: "inventory.json")
+                        LocalStorage.save(Array(self.seenUpdateKeys), to: "seenUpdateKeys.json")
+                    }
+                }
             }
 
 

@@ -75,6 +75,7 @@ struct ProductListView: View {
                         Label("Dodaj", systemImage: "plus")
                     }
                 }
+                
             }
 
             // Right-hand detail view

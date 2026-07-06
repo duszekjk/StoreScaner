@@ -7,6 +7,22 @@ struct InventoryView: View {
     let updates: [ProductUpdate]
 
     @State private var selectedProduct: ProductType?
+    @State private var showShareSheet = false
+    @State private var exportURL: URL?
+    
+    @State private var showImporter = false
+    @EnvironmentObject var mpManager : MPConnectionManager
+    
+    
+    
+    @State private var selectedImportData: Data?
+    @State private var showBackupSheet = false
+    @State private var backupURL: URL?
+    @State private var showFinalResetAlert = false
+    @State private var pendingImportedUpdates: [ProductUpdate]?
+    @State private var delimiterSelection: CSVDelimiter? = nil
+    @State private var showDelimiterDialog = false
+
 
     func trimmedLabel(for id: String) -> String {
         let parts = id.split(separator: "_")
@@ -15,6 +31,7 @@ struct InventoryView: View {
 
     var body: some View {
         NavigationView {
+
             List(productTypes, id: \.productID, selection: $selectedProduct) { product in
                 NavigationLink(destination: InventoryDetailView(
                     product: product,
@@ -28,10 +45,192 @@ struct InventoryView: View {
                 }
             }
             .navigationTitle("Stan magazynowy")
+            .toolbar {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    
+                    Button {
+                        showImporter = true
+                    } label: {
+                        Label("Import", systemImage: "square.and.arrow.down")
+                    }
+                    Button {
+
+                        if let url = FileExporter.exportProductUpdatesAsCSV(mpManager.productUpdates)
+                        {
+                            exportURL = url
+                            DispatchQueue.main.async()
+                            {
+                                if(exportURL != nil)
+                                {
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5)
+                                    {
+                                        showShareSheet = true
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Eksport CSV", systemImage: "square.and.arrow.up")
+                    }
+//
+//                    Button {
+//                        if let url = FileExporter.exportProductUpdates(mpManager.productUpdates) {
+//                            exportURL = url
+//                            showShareSheet = true
+//                        }
+//                    } label: {
+//                        Label("Eksport CSV", systemImage: "square.and.arrow.up.on.square")
+//                    }
+                }
+            }
+            .fileImporter(
+                isPresented: $showImporter,
+                allowedContentTypes: [.commaSeparatedText],
+                allowsMultipleSelection: false
+            ) { result in
+                do {
+                    guard let url = try result.get().first else { return }
+                    if url.startAccessingSecurityScopedResource() {
+                        defer { url.stopAccessingSecurityScopedResource() }
+
+                        let data = try Data(contentsOf: url)
+                        if let text = String(data: data, encoding: .utf8) {
+                            print("📄 CSV contents:\n\(text)")
+                        } else {
+                            print("❌ Failed to decode CSV data as UTF-8")
+                        }
+
+                        selectedImportData = data
+                    } else {
+                        print("⚠️ Could not access security-scoped resource")
+                    }
+
+                    showDelimiterDialog = true
+
+                } catch {
+                    print("Import failed: \(error)")
+                }
+            }
+            .confirmationDialog("Select CSV Delimiter", isPresented: $showDelimiterDialog, titleVisibility: .visible) {
+                ForEach(CSVDelimiter.allCases, id: \.self) { delimiter in
+                    Button(delimiter.description) {
+                        delimiterSelection = delimiter
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+
+
+
 
             Text("Wybierz produkt po lewej stronie")
         }
         .navigationViewStyle(.automatic)
+        .sheet(isPresented: $showShareSheet) {
+            if let exportURL {
+                ShareSheet(activityItems: [exportURL])
+            }
+        }
+        .sheet(isPresented: $showBackupSheet, onDismiss: {
+            showFinalResetAlert = true
+        }) {
+            if let backupURL {
+                ShareSheet(activityItems: [backupURL])
+            }
+        }
+        .alert("🧨 Confirm Reset?", isPresented: $showFinalResetAlert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Reset", role: .destructive) {
+                guard let updatesLoad = pendingImportedUpdates else { return }
+
+
+                mpManager.resetAllData(withUpdates: updatesLoad)
+
+                var newTime = mpManager.resetTimestamp?.advanced(by: 1.0) ?? Date().timeIntervalSince1970.advanced(by: 1.0)
+
+                let updates = updatesLoad.map { updateNew -> ProductUpdate in
+                    var update = updateNew
+                    newTime += 0.001
+                    update.timestamp = newTime
+                    return update
+                }
+                mpManager.productUpdates = updates
+                mpManager.seenUpdateKeys = Set(updates.map(\.uniqueKey))
+                mpManager.inventory = []
+
+                LocalStorage.save(mpManager.productUpdates, to: "productUpdates.json")
+                LocalStorage.save(mpManager.inventory, to: "inventory.json")
+                LocalStorage.save(Array(mpManager.seenUpdateKeys), to: "seenUpdateKeys.json")
+//                for update in updates {
+////                    if let index = mpManager.inventory.firstIndex(where: { $0.productItemID == update.productItemID }) {
+////                        mpManager.inventory[index].count += update.delta
+////                        mpManager.inventory[index].lastUpdateTimestamp = update.timestamp
+////                    } else {
+//                        mpManager.inventory.append(InventoryItem(
+//                            productItemID: update.productItemID,
+//                            count: update.delta,
+//                            lastUpdateTimestamp: update.timestamp
+//                        ))
+////                    }
+//                }
+                mpManager.recalculateInventory()
+
+                LocalStorage.save(mpManager.productUpdates, to: "productUpdates.json")
+                LocalStorage.save(mpManager.inventory, to: "inventory.json")
+                LocalStorage.save(Array(mpManager.seenUpdateKeys), to: "seenUpdateKeys.json")
+                
+                mpManager.sendCurrentState()
+                mpManager.logEvent("📥 Imported \(updates.count) updates from CSV and synced")
+            }
+
+        } message: {
+            Text("Backup was created. This will remove all old updates and inventory. Continue?")
+        }
+        .onChange(of: delimiterSelection) { delimiter in
+            print("Selected delimiter: \(delimiter?.description ?? "nil")")
+            guard let delimiter, let data = selectedImportData else {
+                print("Missing data or delimiter")
+                return
+            }
+            do {
+                let updates = try InventoryImporter.importProductUpdatesCSV(data: data, delimiter: delimiter.rawValue)
+                pendingImportedUpdates = updates
+                print("✅ Parsed \(updates.count) updates")
+
+                if updates.isEmpty {
+                    print("No updates to import")
+                    return
+                }
+
+                // Export current backup
+                if let url = FileExporter.exportProductUpdatesBackup(mpManager.productUpdates) {
+                    backupURL = url
+                    DispatchQueue.main.async()
+                    {
+                        if(backupURL != nil)
+                        {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5)
+                            {
+                                showBackupSheet = true
+                            }
+                        }
+                        else
+                        {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5)
+                            {
+                                showFinalResetAlert = true
+                            }
+                        }
+                    }
+                }
+            } catch {
+                mpManager.logEvent("❌ Failed to import updates: \(error.localizedDescription)")
+            }
+
+        }
+
+
+
     }
 }
 
@@ -39,6 +238,7 @@ struct InventoryDetailView: View {
     @State private var selectedGender: String? = nil
     @State private var selectedSize: String? = nil
     @State private var selectedColor: String? = nil
+
     func trimmedLabel(for id: String) -> String {
         let parts = id.split(separator: "_")
         return parts.count > 1 ? String(parts.suffix(1).joined(separator: "+")) : id
@@ -70,7 +270,8 @@ struct InventoryDetailView: View {
     }
     
     var matchingItems: [InventoryItem] {
-        inventory.filter { $0.productItemID.hasPrefix(product.productID) }
+        print(inventory)
+        return inventory.filter { $0.productItemID.hasPrefix(product.productID) }
     }
     
     var soldUpdates: [ProductUpdate] {
@@ -120,6 +321,24 @@ struct InventoryDetailView: View {
             let sizes = product.sizes ?? []
             let colors = product.colors ?? []
             VStack(alignment: .leading, spacing: 10) {
+//                HStack {
+//                    Button("📤 Eksportuj jako JSON") {
+//                        if let url = FileExporter.exportInventory(filteredMatchingItems, as: .json) {
+//                            print("Exported file at: \(url.path)")
+//                            exportURL = url
+//                            showShareSheet = true
+//                        }
+//                    }
+//                    Button("📤 Eksportuj jako CSV") {
+//                        if let url = FileExporter.exportInventory(filteredMatchingItems, as: .csv) {
+//                            print("Exported file at: \(url.path)")
+//                            exportURL = url
+//                            showShareSheet = true
+//                        }
+//                    }
+//                }
+//                .padding(.bottom)
+
                 VStack {
                     if !genders.isEmpty {
                         Picker("Płeć", selection: $selectedGender) {
@@ -229,6 +448,8 @@ struct InventoryDetailView: View {
                     
                     ForEach(soldUpdates.sorted(by: { $0.timestamp > $1.timestamp }).prefix(20), id: \.uniqueKey) { update in
                         VStack(alignment: .leading) {
+                            Text(product.name)
+                                .bold()
                             Text("🆔 \(update.productItemID.replacingOccurrences(of: "_", with: "\n"))")
                                 .lineLimit(5)
                             Text("🕒 \(Date(timeIntervalSince1970: update.timestamp).formatted(date: .numeric, time: .shortened))")
@@ -240,5 +461,25 @@ struct InventoryDetailView: View {
                 .padding()
             }
         }
+//        .sheet(isPresented: $showShareSheet) {
+//            if let exportURL {
+//                ShareSheet(activityItems: [exportURL])
+//            } else {
+//                Text("Nie znaleziono pliku do udostępnienia.")
+//            }
+//        }
     }
+}
+import UIKit
+import SwiftUI
+
+struct ShareSheet: UIViewControllerRepresentable {
+    var activityItems: [Any]
+    var applicationActivities: [UIActivity]? = nil
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

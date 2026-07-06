@@ -58,7 +58,7 @@ struct ProductUpdate: Codable, Hashable {
     var delta: Int
     var price: Double
     var currency: String
-    let timestamp: TimeInterval
+    var timestamp: TimeInterval
     let originPeerID: String
     var uniqueKey: String {
         "\(productItemID)-\(timestamp)-\(originPeerID)"
@@ -70,6 +70,7 @@ struct InventoryItem: Codable, Hashable {
     var count: Int
     var lastUpdateTimestamp: TimeInterval
 }
+
 
 
 

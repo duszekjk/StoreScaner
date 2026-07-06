@@ -5,6 +5,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_ssync123abc._tcp</string>
+		<string>_ssc123v3._tcp</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>

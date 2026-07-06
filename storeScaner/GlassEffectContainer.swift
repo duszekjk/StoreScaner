@@ -20,11 +20,19 @@ import Foundation
 
 import SwiftUI
 
-// Empty version of GlassEffectContainer
+//
+//  GlassEffectContainer.swift
+//  storeScaner
+//
+//  Created by Jacek Kałużny on 21/06/2025.
+//
+
+import SwiftUI
+
 struct GlassEffectContainer<Content: View>: View {
     let spacing: CGFloat
     let content: () -> Content
-    
+
     init(spacing: CGFloat, @ViewBuilder content: @escaping () -> Content) {
         self.spacing = spacing
         self.content = content
@@ -32,8 +40,27 @@ struct GlassEffectContainer<Content: View>: View {
 
     var body: some View {
         content()
+            .modifier(GlassEffectModifier())
     }
 }
+
+private struct GlassEffectModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .glassEffect()
+        } else {
+            content
+                .background(
+                    .thickMaterial
+                        .opacity(0.9) // slightly less transparent
+                        .blendMode(.plusLighter) // pushes toward white
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+}
+
 
 // Dummy modifiers
 extension View {
